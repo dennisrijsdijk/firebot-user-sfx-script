@@ -1,108 +1,127 @@
-import {ScriptModules} from "@crowbartools/firebot-custom-scripts-types";
-import {JsonDB} from "node-json-db";
-import {TwitchUserSfx, UserSfx, UserSfxAudioSettings, UserSfxGlobalSettings} from "./@types/UserSfx";
-import {getTwitchUsers} from "./twitchApi";
+import firebot from "@crowbartools/firebot-types";
+import { getTwitchUsers } from "./twitchApi";
+import path from "node:path";
+import { existsSync } from "node:fs";
+import { readFile, rm, mkdir, writeFile } from "node:fs/promises";
 
 class UserSfxManager {
-    private _db: JsonDB;
-    private _modules: ScriptModules;
+    private _playedUsers: string[] = [];
+    private _users: Record<string, UserSfx> = {};
 
-    public async getAllTwitchUsers(): Promise<Record<string, TwitchUserSfx>> {
+    private _dataFolder = path.join(firebot.storage.path, "..", "user-sfx");
+    private _playedUsersPath = path.join(this._dataFolder, "played-users.json");
+    private _usersPath = path.join(this._dataFolder, "user-sfx.json");
+
+    public async migrateAndLoadDatabase() {
+        if (!existsSync(path.join(this._dataFolder))) {
+            await mkdir(this._dataFolder, { recursive: true });
+        }
+
+        const oldDatabasePath = path.join(firebot.storage.path, "..", "..", "db", "userSfx.db");
+        if (!existsSync(oldDatabasePath)) {
+            return this.loadDatabase();
+        }
+
+        const legacyUserDatabase: { lastReset: number; users: Record<string, LegacyUserSfx>; } = JSON.parse((await readFile(oldDatabasePath)).toString());
+        for (const [id, sfx] of Object.entries(legacyUserDatabase.users)) {
+            if (sfx.lastRedemption > legacyUserDatabase.lastReset) {
+                this._playedUsers.push(id);
+            }
+
+            this._users[id] = {
+                volume: sfx.volume,
+                path: sfx.path
+            };
+        }
+
+        await this.savePlayedUsers();
+        await this.saveUsers();
+
+        await rm(oldDatabasePath);
+    }
+
+    private async savePlayedUsers() {
+        await writeFile(this._playedUsersPath, JSON.stringify(this._playedUsers));
+    }
+
+    private async saveUsers() {
+        await writeFile(this._usersPath, JSON.stringify(this._users));
+    }
+
+    private async loadDatabase() {
+        if (!existsSync(this._playedUsersPath)) {
+            await writeFile(this._playedUsersPath, JSON.stringify(this._playedUsers));
+        } else {
+            this._playedUsers = JSON.parse((await readFile(this._playedUsersPath)).toString());
+        }
+
+        if (!existsSync(this._usersPath)) {
+            await writeFile(this._usersPath, JSON.stringify(this._users));
+        } else {
+            this._users = JSON.parse((await readFile(this._usersPath)).toString());
+        }
+    }
+
+    public async getAllTwitchUsers(): Promise<Record<string, TwitchUserSfx> | null> {
         try {
-            const users: Record<string, TwitchUserSfx> = JSON.parse(JSON.stringify(this._db.getData('/users/')));
-            if (Object.keys(users).length === 0) {
+            if (Object.keys(this._users).length === 0) {
                 return {};
             }
-            const twitchUsers = await getTwitchUsers(Object.keys(users));
-            twitchUsers.forEach(user => {
-                if (user.displayName.toLowerCase() !== user.name.toLowerCase()) {
-                    users[user.id].name = `${user.displayName} (${user.name})`;
-                } else {
-                    users[user.id].name = user.displayName;
+            const twitchUsers = await getTwitchUsers(Object.keys(this._users));
+            return Object.fromEntries(twitchUsers.map((twitchUser) => {
+                const userSfx = this._users[twitchUser.id];
+                let name = twitchUser.displayName;
+                if (twitchUser.displayName.toLowerCase() !== twitchUser.name.toLowerCase()) {
+                    name = `${name} (${twitchUser.name})`;
                 }
-                users[user.id].icon = user.profilePictureUrl;
-            });
-            return users;
+                const twitchUserSfx: TwitchUserSfx = {
+                    name,
+                    icon: twitchUser.profilePictureUrl,
+                    path: userSfx.path,
+                    volume: userSfx.volume
+                }
+
+                return [twitchUser.id, twitchUserSfx];
+            }));
         } catch (err) {
-            this._modules.logger.error("user-sfx script: error while retrieving Twitch users", err);
+            firebot.logger.error("error while retrieving Twitch users", err);
             return null;
         }
     }
 
-    public getUser(id: string): UserSfx {
-        if (!Object.keys(this._db.getData('/users/')).includes(id)) {
-            return null;
+    public async deleteUser(id: string) {
+        delete this._users[id];
+        const playedUserIndex = this._playedUsers.findIndex(stored => stored === id);
+        if (playedUserIndex >= 0) {
+            this._playedUsers.splice(playedUserIndex);
+            await this.savePlayedUsers();
         }
-        return this._db.getData(`/users/${id}`);
+        await this.saveUsers();
     }
 
-    public addEmptyUser(id: string) {
-        this._db.push(`/users/${id}`, {volume: 5, path: "", lastRedemption: 0}, true);
+    public getUserSfx(id: string): UserSfx | undefined {
+        return structuredClone(this._users[id]);
     }
 
-    public deleteUser(id: string) {
-        this._db.delete(`/users/${id}`);
+    public async setUserSfx(id: string, sfx: UserSfx) {
+        this._users[id] = structuredClone(sfx);
+        await this.saveUsers();
     }
 
-    public getUserVolume(id: string): number {
-        return this._db.getData(`/users/${id}/volume`);
-    }
-
-    public setUserVolume(id: string, volume: number): void {
-        this._db.push(`/users/${id}/volume`, volume, true);
-    }
-
-    public getUserPath(id: string): number {
-        return this._db.getData(`/users/${id}/path`);
-    }
-
-    public setUserPath(id: string, path: string): void {
-        this._db.push(`/users/${id}/path`, path, true);
-    }
-
-    public setUserRedemptionTime(id: string): void {
-        this._db.push(`/users/${id}/lastRedemption`, +new Date(), true);
-    }
-
-    public getLastReset(): number {
-        return this._db.getData("/lastReset");
-    }
-
-    public reset(): void {
-        this._db.push("/lastReset", +new Date(), true);
-    }
-
-    constructor(path: string, modules: ScriptModules) {
-        this._modules = modules;
-        // @ts-ignore 😠
-        // filePath, saveOnPush, humanReadable
-        this._db = new modules.JsonDb(path, true, true);
-
-        if (Object.keys(this._db.getObject('/')).length == 0) { // No data
-            this._db.push('/', {lastReset: 1, users: {}}, true);
+    public async trySetUserPlayed(id: string): Promise<boolean> {
+        if (this._playedUsers.includes(id)) {
+            return false;
         }
-        modules.frontendCommunicator.onAsync("user-sfx:get-twitch-users", _ => this.getAllTwitchUsers());
-        modules.frontendCommunicator.on("user-sfx:set-user-volume", args => {
-            let user = args as unknown as {id: string, volume: number}
-            this.setUserVolume(user.id, user.volume);
-        });
-        modules.frontendCommunicator.on("user-sfx:set-user-path", args => {
-            let user = args as unknown as {id: string, path: string}
-            this.setUserPath(user.id, user.path);
-        });
-        // @ts-ignore
-        modules.frontendCommunicator.on("user-sfx:add-user", (id: string) => this.addEmptyUser(id));
-        // @ts-ignore
-        modules.frontendCommunicator.on("user-sfx:delete-user", (id: string) => this.deleteUser(id));
+
+        this._playedUsers.push(id);
+        await this.savePlayedUsers();
+        return true;
+    }
+
+    public async reset() {
+        this._playedUsers = [];
+        await this.savePlayedUsers();
     }
 }
 
-export let sfxManager: UserSfxManager;
-
-export function createSfxManager(path: string, modules: ScriptModules) {
-    if (sfxManager != null) {
-        return sfxManager;
-    }
-    sfxManager = new UserSfxManager(path, modules);
-    return sfxManager;
-}
+export default new UserSfxManager();

@@ -1,6 +1,5 @@
-import {Effects} from "@crowbartools/firebot-custom-scripts-types/types/effects";
-import {sfxManager} from "./userSfxManager";
-import EffectType = Effects.EffectType;
+import { EffectType } from "@crowbartools/firebot-types";
+import sfxManager from "./userSfxManager";
 
 const effect: EffectType<null> = {
     definition: {
@@ -8,12 +7,10 @@ const effect: EffectType<null> = {
         name: "Reset User SFX Cooldown",
         description: "Reset Cooldown for User Sound Effects",
         icon: "fad fa-waveform",
-        // @ts-ignore
         categories: ["twitch"]
     },
     optionsTemplate: "",
     optionsController: () => null,
-    // @ts-ignore
     optionsValidator: () => [],
     onTriggerEvent: async (scope) => sfxManager.reset()
 }

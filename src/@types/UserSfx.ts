@@ -1,21 +1,24 @@
-export interface UserSfxGlobalSettings {
+interface UserSfxGlobalSettings {
     audio: UserSfxAudioSettings;
     users: Record<string, UserSfx>;
 }
 
-export interface UserSfxAudioSettings {
+interface UserSfxAudioSettings {
     deviceLabel: string;
     deviceId: string;
     overlayInstance: string;
 }
 
-export interface UserSfx {
+interface UserSfx {
     path: string;
     volume: number;
+}
+
+interface LegacyUserSfx extends UserSfx {
     lastRedemption: number;
 }
 
-export interface TwitchUserSfx extends UserSfx {
+interface TwitchUserSfx extends UserSfx {
     name: string;
     icon: string;
 }

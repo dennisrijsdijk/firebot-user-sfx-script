@@ -1,17 +1,14 @@
-import {Effects} from "@crowbartools/firebot-custom-scripts-types/types/effects";
-import template from './play-sfx.html'
-import {TwitchUserSfx} from "./@types/UserSfx";
-import {sfxManager} from "./userSfxManager";
-import {modules, settings} from "./main";
-import EffectType = Effects.EffectType;
+import firebot, { EffectType, FirebotAudioDevice, RunEffectsContext } from "@crowbartools/firebot-types";
+import template from './template.html'
+import sfxManager from "../userSfxManager";
 
 interface EffectModel {
     audioOutputDevice: {
         deviceId: string;
         label: string;
     };
-    overlayInstance: string;
-    activeUser: string;
+    overlayInstance?: string;
+    activeUser?: string;
 }
 
 const effect: EffectType<EffectModel> = {
@@ -20,19 +17,26 @@ const effect: EffectType<EffectModel> = {
         name: "Play User SFX",
         description: "play user SFX",
         icon: "fad fa-waveform",
-        // @ts-ignore
         categories: ["twitch"]
     },
     optionsTemplate: template,
     optionsController: ($scope, utilityService: any, backendCommunicator: any, $q: any, $timeout: any) => {
         $scope.sliderTranslate = (value: number) => Math.round(value * 10) + '%';
 
-        $scope.volumeUpdated = (id: string, value: number) => {
-            backendCommunicator.fireEvent("user-sfx:set-user-volume", {id: id, volume: value});
+        $scope.volumeUpdated = (id: string, volume: number) => {
+            const user = {
+                path: $scope.users[id].path,
+                volume: volume
+            }
+            backendCommunicator.fireEventAsync("dennisontheinternet:user-sfx:set-user", id, user);
         }
 
         $scope.pathUpdated = (id: string, path: string) => {
-            backendCommunicator.fireEvent("user-sfx:set-user-path", {id: id, path: path});
+            const user = {
+                path: path,
+                volume: $scope.users[id].volume
+            }
+            backendCommunicator.fireEventAsync("dennisontheinternet:user-sfx:set-user", id, user);
         };
 
         $scope.selectionChanged = (id: string) => {
@@ -58,7 +62,6 @@ const effect: EffectType<EffectModel> = {
                                 return resolve(false);
                             }
 
-                            // @ts-ignore
                             if (Object.keys($scope.users).some((id: string) => {
                                 return id === user.id;
                             })) {
@@ -69,24 +72,21 @@ const effect: EffectType<EffectModel> = {
                     },
                     validationText: "Viewer already has an intro SFX."
                 },
-                (user: {avatarUrl: string, id: string, username: string, displayName: string}) => {
+                (user: { avatarUrl: string, id: string, username: string, displayName: string }) => {
                     let username: string;
                     if (user.username.toLowerCase() !== user.displayName.toLowerCase()) {
                         username = `${user.displayName} (${user.username})`;
                     } else {
                         username = user.displayName;
                     }
-                    // @ts-ignore 😠
-                    $scope.users[user.id] = {name: username, icon: user.avatarUrl, volume: 5, path: ""};
-                    backendCommunicator.fireEvent("user-sfx:add-user", user.id);
-                    // @ts-ignore 😠
+                    $scope.users[user.id] = { name: username, icon: user.avatarUrl, volume: 5, path: "" };
+                    backendCommunicator.fireEventAsync("dennisontheinternet:user-sfx:set-user", user.id, $scope.users[user.id]);
                     $scope.selectionChanged(user.id);
                 });
         }
 
         $scope.deleteUser = (id: string) => {
             backendCommunicator.fireEvent("user-sfx:delete-user", id);
-            // @ts-ignore 😠
             delete $scope.users[id];
             if ($scope.activeUser === id) {
                 $scope.activeUser = null;
@@ -95,7 +95,7 @@ const effect: EffectType<EffectModel> = {
 
         $scope.activeUser = null;
 
-        $scope.effect.activeUser = null;
+        $scope.effect.activeUser = undefined;
 
         $scope.status = 'fetching';
 
@@ -104,12 +104,12 @@ const effect: EffectType<EffectModel> = {
                 deviceId: "overlay",
                 label: "Send To Overlay"
             };
-            $scope.effect.overlayInstance = null;
+            $scope.effect.overlayInstance = undefined;
         }
 
         $scope.users = {};
 
-        $q.when(backendCommunicator.fireEventAsync("user-sfx:get-twitch-users"))
+        $q.when(backendCommunicator.fireEventAsync("dennisontheinternet:user-sfx:get-twitch-users"))
             .then((result: Record<string, TwitchUserSfx>) => {
                 $scope.users = result;
                 $scope.status = $scope.users != null ? 'fetched' : 'error';
@@ -118,99 +118,82 @@ const effect: EffectType<EffectModel> = {
                 }, 30);
             });
     },
-    // @ts-ignore
     optionsValidator: (effect) => {
         const errors: string[] = [];
         return errors;
     },
-    onTriggerEvent: async (scope) => {
+    onTriggerEvent: async (event) => {
         let userId = '';
-        switch (scope.trigger.type) {
+        switch (event.trigger.type) {
             case "command":
-                userId = scope.trigger.metadata.chatMessage.userId;
+                userId = event.trigger.metadata.chatMessage!.userId;
                 break;
             case "event":
-                if (scope.trigger.metadata.event.id === "chat-message") {
-                    // @ts-ignore
-                    userId = scope.trigger.metadata.eventData.chatMessage.userId;
+                if (event.trigger.metadata.event!.id === "chat-message") {
+                    userId = event.trigger.metadata.eventData!.chatMessage!.userId;
                 } else {
-                    modules.logger.error(`user-sfx script: Unknown event '${scope.trigger.metadata.event.id}', expected 'chat-message'`);
+                    firebot.logger.error(`Unknown event '${event.trigger.metadata.event!.id}', expected 'chat-message'`);
                     return false;
                 }
                 break;
-            // @ts-ignore 😠
             case "channel_reward":
-                // @ts-ignore
-                userId = scope.trigger.metadata.userId;
+                userId = event.trigger.metadata.userId as string;
                 break;
             case "manual":
-                if (scope.effect.activeUser == null || scope.effect.activeUser === "") {
+                if (event.effect.activeUser == null || event.effect.activeUser === "") {
                     return;
                 }
-                userId = scope.effect.activeUser;
+                userId = event.effect.activeUser;
                 break;
             default:
-                debugger;
-                modules.logger.error("user-sfx script: got trigger " + scope.trigger.type + ", expected 'command', 'channel_reward' or 'event'.");
+                firebot.logger.error("got trigger " + event.trigger.type + ", expected 'command', 'channel_reward' or 'event'.");
                 return false;
         }
 
-        const user = sfxManager.getUser(userId);
+        const user = sfxManager.getUserSfx(userId);
         if (user == null) {
             return;
         }
 
-        if (scope.trigger.type !== "manual") {
-            if (user.lastRedemption >= sfxManager.getLastReset()) {
+        if (event.trigger.type !== "manual") {
+            if (!await sfxManager.trySetUserPlayed(userId)) {
                 return;
             }
-
-            sfxManager.setUserRedemptionTime(userId);
         }
 
-        const data: {
-            filepath: string;
+        const firebotSoundEffectModel: {
+            soundType: "local";
             volume: number;
-            audioOutputDevice: EffectModel["audioOutputDevice"];
-            overlayInstance: string;
-            resourceToken?: string
+            filepath: string;
+            overlayInstance?: string;
+            audioOutputDevice: FirebotAudioDevice;
+            waitForSound: boolean;
         } = {
-            filepath: user.path,
+            soundType: "local",
             volume: user.volume,
-            audioOutputDevice: scope.effect.audioOutputDevice,
-            overlayInstance: scope.effect.overlayInstance,
-        }
+            filepath: user.path,
+            overlayInstance: event.effect.overlayInstance,
+            audioOutputDevice: event.effect.audioOutputDevice,
+            waitForSound: true
+        };
 
-        if (data.audioOutputDevice == null || data.audioOutputDevice.label === "App Default") {
-            data.audioOutputDevice = settings.getAudioOutputDevice();
-            if (data.audioOutputDevice.deviceId == "overlay") {
-                data.overlayInstance = null;
+        const runEffectsContext: RunEffectsContext = {
+            trigger: event.trigger,
+            effects: {
+                id: crypto.randomUUID(),
+                list: [
+                    {
+                        id: crypto.randomUUID(),
+                        type: "firebot:playsound",
+                        ...firebotSoundEffectModel
+                    }
+                ]
             }
         }
 
-        const duration = await modules.frontendCommunicator.fireEventAsync("getSoundDuration", {
-            path: "file://" + data.filepath
-        });
+        await firebot.effects.processEffects(runEffectsContext);
 
-        // @ts-ignore
-        const durationMs = (Math.round(duration) || 0) * 1000;
-
-        // Generate token if going to overlay, otherwise send to gui.
-        if (scope.effect.audioOutputDevice.deviceId === "overlay") {
-            // @ts-ignore
-            data.resourceToken = modules.resourceTokenManager.storeResourcePath(
-                data.filepath,
-                durationMs
-            );
-            modules.httpServer.sendToOverlay("sound", data)
-            // send event to the overlay
-        } else {
-            // Send data back to media.js in the gui.
-            renderWindow.webContents.send("playsound", data);
-        }
-
-        // @ts-ignore
-        await modules.utils.wait(durationMs);
+        return;
     }
 }
 
